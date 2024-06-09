@@ -4,6 +4,7 @@ require('dotenv').config()
 const jwt = require('jsonwebtoken');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const cors = require('cors');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 3000;
 
 // middleware
@@ -12,7 +13,6 @@ app.use(cors({
     credentials: true
 }))
 app.use(express.json());
-
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.uj1q2ho.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -134,7 +134,6 @@ app.get('/users', verifyToken, verifyAdmin, async(req, res)=>{
       const id = req.params.id;
       const query = {_id: new ObjectId(id)}
       const result = await menuCollection.findOne(query)
-      console.log(result)
       res.send(result)
     });
 
@@ -188,10 +187,83 @@ app.get('/users', verifyToken, verifyAdmin, async(req, res)=>{
       const query = {_id: new ObjectId(id)};
       const result = await cartCollection.deleteOne(query);
       res.send(result)
+    });
+
+    // stripe payment intent
+    app.post('/create-payment-intent', async(req, res) =>{
+      const {price} = req.body;
+      const amount = parseInt(price * 100);
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      })
+    });
+
+    // stats or analytics
+    app.get('/admin-stats', verifyToken, verifyAdmin, async(req, res) =>{
+      const users = await userCollection.estimatedDocumentCount()
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      const results = await paymentCollection.aggregate([
+        {
+          $group:{
+             _id: null,
+             totalRevenue: {
+              $sum: '$price',
+             }
+          }
+        }
+      ]).toArray();
+      const revenue = results.length > 0 ? results[0].totalRevenue : 0;
+      res.send({
+        users, menuItems, orders, revenue
+      })
     })
 
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // using aggregate pipeline
+    app.get('/order-stats', async(req, res)=>{
+      const results = await paymentCollection.aggregate([
+        {
+          $unwind: '$menuItemIds'
+        },
+        {
+          $lookup: {
+            from: 'menu',
+            localField: 'menuItemIds',
+            foreignField: '_id',
+            as: 'menuItems'
+          }
+        },
+        {
+          $unwind: '$menuItems'
+        },
+       {
+         
+        $group: {
+          _id : '$menuItems.category',
+          quantity: {$sum: 1},
+          revenue: {$sum: '$menuItems.price'}
+        }
+       },
+       {
+        $project: {
+          _id: 0,
+          category: '$_id',
+          quantity : '$quantity',
+          revenue: '$revenue'
+        }
+       }
+      ])
+    })
+
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
